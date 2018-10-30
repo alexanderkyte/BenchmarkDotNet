@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -11,9 +12,72 @@ using JetBrains.Annotations;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using OurPlatform = BenchmarkDotNet.Environments.Platform;
+using MonoRuntime = BenchmarkDotNet.Environments.MonoRuntime;
 
 namespace BenchmarkDotNet.Toolchains.Roslyn
 {
+    [PublicAPI]
+    public class MonoAotBuilder : Builder
+    {
+        MonoRuntime mono;
+
+        [PublicAPI]
+        public override BuildResult Build(GenerateResult generateResult, BuildPartition buildPartition, ILogger logger)
+        {
+            BuildResult result = base.Build (generateResult, buildPartition, logger);
+
+            if (!result.IsBuildSuccess)
+                return result;
+
+            var dllPath = generateResult.ArtifactsPaths.ExecutablePath;
+            var monoPath = mono.CustomPath ?? "mono";
+
+            try {
+                using (var process = new Process { StartInfo = CreateMonoAot(monoPath, dllPath) })
+                {
+                    logger.WriteLineInfo("// Execute: " + process.StartInfo.FileName + " " + process.StartInfo.Arguments);
+                    ConsoleHandler.Instance.SetProcess(process);
+                    process.Start();
+                    process.WaitForExit(); // should we add timeout here?
+
+                    if (process.ExitCode != 0)
+                        logger.WriteLineError("Attempt to AOT failed: " + process.StartInfo.FileName + " " + process.StartInfo.Arguments);
+                }
+            }
+            finally
+            {
+                ConsoleHandler.Instance.ClearProcess();
+            }
+
+            return result;
+        }
+
+        private ProcessStartInfo CreateMonoAot(string monoPath, string filePath)
+        {
+            var absFilePath = Path.GetFullPath(filePath);
+            var start = new ProcessStartInfo
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardInput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(absFilePath)
+            };
+            start.FileName = monoPath;
+            start.Arguments = String.Format("{0} {1}", mono.AotArgs, absFilePath);
+            if (mono.MonoBclPath != null)
+                start.EnvironmentVariables ["MONO_PATH"] = mono.MonoBclPath;
+
+            return start;
+        }
+
+        public MonoAotBuilder (MonoRuntime monoReference)
+        {
+            mono = monoReference;
+        }
+    }
+
     [PublicAPI]
     public class Builder : IBuilder
     {
@@ -22,7 +86,7 @@ namespace BenchmarkDotNet.Toolchains.Roslyn
         private static readonly Lazy<AssemblyMetadata[]> FrameworkAssembliesMetadata = new Lazy<AssemblyMetadata[]>(GetFrameworkAssembliesMetadata);
 
         [PublicAPI]
-        public BuildResult Build(GenerateResult generateResult, BuildPartition buildPartition, ILogger logger)
+        public virtual BuildResult Build(GenerateResult generateResult, BuildPartition buildPartition, ILogger logger)
         {
             logger.WriteLineInfo($"BuildScript: {generateResult.ArtifactsPaths.BuildScriptFilePath}");
 
